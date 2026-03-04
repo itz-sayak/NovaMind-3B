@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Weights & Biases (runtime logs — keep source)
+wandb/
+
+# Large binary / dataset files
+*.bin
+*.pt
+*.pth
+*.safetensors
+*.npz
+*.npy
+*.pkl
+*.h5
+*.hdf5
+
+# Checkpoints & model outputs
+checkpoints/
+outputs/
+runs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Tokenizer vocab (auto-generated)
+tokenizer/vocab/
+tokenizer/merges/
+*.model
+*.vocab
