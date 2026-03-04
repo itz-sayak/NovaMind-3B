@@ -1,4 +1,4 @@
-# NovaMind-3B: A NovaMind Inspired 3B Parameter Model
+# NovaMind-3B: A 3B Parameter Model
 
 A from-scratch implementation of a 3 billion parameter language model inspired by the NovaMind architecture, optimized for dense scaling on dual-GPU setups. Trained on 250+ billion tokens of high-quality code, math, web, and educational text.
 
