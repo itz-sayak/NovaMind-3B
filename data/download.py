@@ -1349,37 +1349,39 @@ def download_large_pretrain_data():
         ),
     )
 
-    # ── 2. Falcon RefinedWeb (massive deduplicated web crawl)
-    reset_dedup()
-    total_new += stream_tokenize_to_bin(
-        source_name     = "falcon_refinedweb",
-        hf_name         = "tiiuae/falcon-refinedweb",
-        text_field      = "content",
-        bin_path        = train_bin,
-        n_tokens_target = 600_000_000_000,   # full Falcon RefinedWeb (~600B tokens)
-        hf_kwargs       = {"split": "train"},
-        filter_fn       = lambda x: (
-            text_quality(x.get("content", ""), min_len=300)
-            and is_english(x.get("content", ""))
-            and not is_duplicate(x.get("content", ""))
-        ),
-    )
+    # ── 2. Falcon RefinedWeb — DISABLED (600B tokens, ~2.4 TB)
+    # Uncomment to resume. Requires ~2.4 TB free disk.
+    # reset_dedup()
+    # total_new += stream_tokenize_to_bin(
+    #     source_name     = "falcon_refinedweb",
+    #     hf_name         = "tiiuae/falcon-refinedweb",
+    #     text_field      = "content",
+    #     bin_path        = train_bin,
+    #     n_tokens_target = 600_000_000_000,
+    #     hf_kwargs       = {"split": "train"},
+    #     filter_fn       = lambda x: (
+    #         text_quality(x.get("content", ""), min_len=300)
+    #         and is_english(x.get("content", ""))
+    #         and not is_duplicate(x.get("content", ""))
+    #     ),
+    # )
 
-    # ── 3. DCLM baseline (DataComp filtered, mixed quality CommonCrawl)
-    reset_dedup()
-    total_new += stream_tokenize_to_bin(
-        source_name     = "dclm_baseline",
-        hf_name         = "mlfoundations/dclm-baseline-1.0",
-        text_field      = "text",
-        bin_path        = train_bin,
-        n_tokens_target = 4_000_000_000_000,  # full DCLM baseline (~4T tokens, disk-limited)
-        hf_kwargs       = {"split": "train"},
-        filter_fn       = lambda x: (
-            text_quality(x.get("text", ""), min_len=300)
-            and is_english(x.get("text", ""))
-            and not is_duplicate(x.get("text", ""))
-        ),
-    )
+    # ── 3. DCLM baseline — DISABLED (4T tokens, ~16 TB)
+    # Uncomment to resume. Requires massive disk.
+    # reset_dedup()
+    # total_new += stream_tokenize_to_bin(
+    #     source_name     = "dclm_baseline",
+    #     hf_name         = "mlfoundations/dclm-baseline-1.0",
+    #     text_field      = "text",
+    #     bin_path        = train_bin,
+    #     n_tokens_target = 4_000_000_000_000,
+    #     hf_kwargs       = {"split": "train"},
+    #     filter_fn       = lambda x: (
+    #         text_quality(x.get("text", ""), min_len=300)
+    #         and is_english(x.get("text", ""))
+    #         and not is_duplicate(x.get("text", ""))
+    #     ),
+    # )
 
     final_gb  = os.path.getsize(train_bin) / (1024 ** 3) if os.path.exists(train_bin) else 0
     final_tok = os.path.getsize(train_bin) // 4 if os.path.exists(train_bin) else 0
