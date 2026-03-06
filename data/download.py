@@ -21,7 +21,7 @@ Pretraining data target: ~350GB on disk → ~120B tokens
   - RedPajama SE:         500K,~3GB  (stackexchange slice as long-form text)
   - lvwerra SE paired:    500K,~5GB  (StackExchange Q&A, Markdown, 26.8M total)
   - FLAN collection:      500K,~2GB  (diverse NLP tasks + templates, instruction format)
-  - SmolTalk:             300K,~3GB  (multi-turn conversational instruction pairs)
+  - SmolTalk:             500K,~5GB  (smol-smoltalk, high-quality multi-turn pairs)
   - Alpaca:                52K,~50MB (GPT-3.5 general instruction following)
 
 SFT  (~5GB)
@@ -939,12 +939,13 @@ def download_new_pretrain_data():
         transform_fn=_flan_transform,
     )
 
-    # ── 7. SmolTalk — HuggingFaceTB/smoltalk ────────────────────────────────
-    # ~20M multi-turn conversational pairs from SmolLM-2 data curation.
-    # Fields: messages (list of {role, content}), source (str).
+    # ── 7. SmolTalk — HuggingFaceTB/smol-smoltalk ───────────────────────────
+    # ~1M high-quality multi-turn instruction pairs (smol-smoltalk, curated
+    # by HuggingFaceTB for SmolLM-2 training). Better quality than smoltalk.
+    # Fields: messages (list of {role, content}).
     # We flatten into "### Instruction:\n{user}\n\n### Response:\n{assistant}"
     # for each consecutive user/assistant turn pair.
-    print("\n[7/8] SmolTalk — HuggingFaceTB/smoltalk (300K)...")
+    print("\n[7/8] SmolTalk — HuggingFaceTB/smol-smoltalk (500K)...")
 
     def _smoltalk_transform(item):
         messages = item.get("messages") or []
@@ -970,10 +971,10 @@ def download_new_pretrain_data():
     reset_dedup()
     stream_and_save(
         "smoltalk",
-        "HuggingFaceTB/smoltalk",
+        "HuggingFaceTB/smol-smoltalk",
         os.path.join(pretrain_dir, "smoltalk"),
-        n_samples=300_000,
-        desc="SmolTalk (300K multi-turn conversational instruction pairs)",
+        n_samples=500_000,
+        desc="SmolTalk (500K smol-smoltalk multi-turn pairs)",
         hf_kwargs={"split": "train"},
         transform_fn=_smoltalk_transform,
     )
