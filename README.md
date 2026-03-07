@@ -26,14 +26,13 @@ A from-scratch implementation of a ~3.7 billion parameter language model using a
 
 ### Key Architecture Features
 
-- **Hybrid 3:1 GDN/MLA**: 75% of layers are Gated DeltaNet (linear O(n) attention with fixed-size recurrent state), 25% are full MLA. This design delivers **8.6×/19× decoding throughput** gains at 32k/256k context lengths compared to a pure-attention baseline.
-- **Gated DeltaNet (GDN)**: Combines two complementary mechanisms — gating (Mamba2-style adaptive state decay) and the delta rule (targeted associative memory writes). State update: `S_t = α_t · S_{t-1} + β_t · k_t ⊗ (v_t − k_t^T · S_{t-1})`. Uses Triton chunk-parallel kernels from `flash-linear-attention` during training; falls back to correct PyTorch recurrent if not available.
-- **Multi-head Latent Attention (MLA)**: Low-rank KV cache compression (768-dim KV, 1536-dim Q); **FlashAttention-2** kernel via `flash_attn_func` (falls back to PyTorch SDPA).
-- **Dense FFN**: All 26 layers use dense SwiGLU FFN (no sparsity, no MoE).
-- **Multi-Token Prediction (MTP)**: Predict next token AND token+1 simultaneously (weight=0.3); MTP block uses MLA for quality.
-- **Warmup Schedule Dampening (WSD)**: Stable learning rate warmup for 3B+ scale.
-- **Exponential Moving Average (EMA)**: β=0.9999 for weight smoothing.
-- **Muon Optimizer**: Newton-Schulz orthogonalization for hidden-layer weights.
+The hybrid 3:1 GDN/MLA ratio means 75% of layers are Gated DeltaNet (linear O(n) attention with a fixed-size recurrent state) while every fourth layer is full MLA. This design delivers **8.6×/19× decoding throughput** gains at 32k/256k context lengths versus a pure-attention baseline.
+
+Gated DeltaNet combines two complementary mechanisms — Mamba2-style adaptive state decay (gating) and targeted associative memory writes (the delta rule). The state update is `S_t = α_t · S_{t-1} + β_t · k_t ⊗ (v_t − k_t^T · S_{t-1})`. During training the Triton chunk-parallel kernels from `flash-linear-attention` are used for speed (~5–10× faster); correctness on any hardware is guaranteed by a pure-PyTorch recurrent fallback.
+
+MLA provides low-rank KV cache compression (768-dim KV, 1536-dim Q) and runs through the FlashAttention-2 kernel via `flash_attn_func`, falling back to PyTorch SDPA if unavailable. All 26 layers use a dense SwiGLU FFN — no sparsity, no MoE — keeping the architecture straightforward and deterministic.
+
+During pretraining, Multi-Token Prediction simultaneously predicts the next token and token+1 (weight=0.3 for the auxiliary loss), with the MTP block implemented as an MLA layer for quality. Training stability at 3B+ scale is handled by Warmup Schedule Dampening (WSD) for the learning rate and an EMA of model weights at β=0.9999. The Muon optimizer applies Newton-Schulz orthogonalization to hidden-layer weight updates, while the embedding, output projection, and normalisation layers use standard AdamW.
 
 ## Project Structure
 
@@ -76,7 +75,7 @@ pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.
 pip install flash-linear-attention
 ```
 
-> **Note:** `flash-linear-attention` is strongly recommended for training. Without it the GDN layers fall back to a correct but slower pure-PyTorch recurrent implementation.
+> **Note:** `flash-linear-attention` must be installed from the GitHub source — the PyPI package is missing the `fla.ops` Triton kernels. It is strongly recommended for training; without it the GDN layers automatically fall back to a correct but slower pure-PyTorch recurrent implementation.
 
 Create a `.env` file in the project root with your HuggingFace token (required for gated datasets):
 
@@ -138,14 +137,9 @@ The script prints a compression comparison vs `cl100k_base` when done.
 
 ## Hardware Requirements
 
-- **GPU**: 2× NVIDIA L40S (48GB each) — tested and verified via DDP
-- **Storage**: ~1.4 TB for full pretraining datasets across 15 sources + streaming stage (on /mnt/zone/A)
-- **VRAM Budget per GPU**:
-  - Model (bf16): ~6 GB (3B params)
-  - Optimizer states: ~12 GB
-  - Activations (batch=1, grad_accum=16, seq=2048): ~8 GB
-  - Peak per GPU: ~26 GB (fits L40S 48GB with buffer)
-- **Network**: All-reduce efficient with 2 GPUs (RTX 40-series PCIe 5.0 p2p)
+The reference configuration is 2× NVIDIA L40S (48 GB each), tested and verified via DDP. Storage requirements are roughly 1.4 TB for the full pretraining dataset (15 Arrow sources plus the streaming stage) on a fast local volume such as `/mnt/zone/A`.
+
+Per-GPU VRAM budget at the target 3B scale: ~6 GB for model weights in bfloat16, ~12 GB for optimizer states, and ~8 GB for activations with batch size 1, 16-step gradient accumulation, and 2048 token sequences — putting the peak at ~26 GB, which fits comfortably inside the 48 GB L40S with a healthy buffer. The two-GPU all-reduce is efficient over PCIe 5.0 peer-to-peer on RTX 40-series hardware.
 
 ## Training Pipeline
 
@@ -210,18 +204,7 @@ srun --partition=gpu2 --gres=gpu:2 \
   python3 train.py --ddp
 ```
 
-**Training hyperparameters:**
-- Batch size: 1 per GPU → 2 effective (DDP all-reduce)
-- Gradient accumulation: 16 steps → effective batch = 32 sequences × 2048 tokens
-- Effective tokens/step: 65,536 tokens
-- Total steps: 400,000 (target: 250–300 B tokens, disk-limited)
-- Learning rate: 2.2e-4 with **warmup schedule dampening (WSD)**
-- Optimizer: **Muon** (lr=0.02 for hidden weights) + **AdamW** (rest of model)
-- Schedule: Linear warmup (4000 steps) → Cosine decay to 2.2e-5
-- Precision: **bfloat16** with gradient checkpointing (peak 26 GB per GPU)
-- EMA: β=0.9999 for parameter smoothing
-- **Multi-Token Prediction**: Depth=1, weight=0.3 → predict [token_t, token_t+1] for better generalization
-- Resume: Automatic from latest checkpoint in `novamind-3b/pretrain/`
+Each GPU processes a batch of 1 sequence; DDP all-reduce across 2 GPUs gives an effective batch of 2. With 16-step gradient accumulation the effective batch is 32 sequences × 2048 tokens = 65,536 tokens per step, targeting 400,000 steps (roughly 250–300 B tokens, disk-limited). The base learning rate is 2.2e-4 with a 4,000-step linear warmup via Warmup Schedule Dampening (WSD), followed by cosine decay to 2.2e-5. Hidden-layer weights use the Muon optimizer at lr=0.02; all other parameters use AdamW. Training runs in bfloat16 with gradient checkpointing (peak ~26 GB per GPU), EMA smoothing at β=0.9999, and Multi-Token Prediction depth=1 at weight=0.3. Checkpoints are saved periodically and training resumes automatically from the latest checkpoint in `novamind-3b/pretrain/`.
 
 ### Stage 2: Supervised Fine-Tuning (after pretraining checkpoint)
 
@@ -235,13 +218,7 @@ srun --partition=gpu2 --gres=gpu:2 \
   python3 sft.py --pretrained novamind-3b/pretrain/checkpoint-latest.pt --ddp
 ```
 
-**SFT datasets** (auto-downloaded):
-- CodeAlpaca (20K) — instruction code generation
-- MathInstruct (262K) — math reasoning instructions
-- OpenAssistant (via HuggingFace) — conversational QA
-- Alpaca (52K) — diverse instructions
-- Dolly 15K (15K) — instruction-following
-- SlimOrca (518K) — synthetic high-quality instructions
+Six instruction datasets are downloaded automatically: CodeAlpaca (20K, instruction code generation), MathInstruct (262K, math reasoning), OpenAssistant (conversational QA, via HuggingFace), Alpaca (52K, diverse instructions), Dolly 15K (15K, instruction-following), and SlimOrca (518K, synthetic high-quality instructions).
 
 ### Stage 3: DPO Preference Alignment
 
@@ -324,24 +301,8 @@ Loss: 4.6xxx (random init)
 Peak memory: ~28 GB  ✓ fits 48GB L40S with buffer
 ```
 
-**Verified working:**
-- ✓ Hybrid 3:1 GDN/MLA layer assignment (layers 3, 7, 11, 15, 19, 23 → MLA; rest → GDN)
-- ✓ GDN forward pass with PyTorch recurrent fallback (no fla required for correctness)
-- ✓ GDN forward pass with `flash-linear-attention` Triton kernels (fast path)
-- ✓ MLA attention with FlashAttention-2 kernel (fused, O(T) memory, ~3× faster than eager)
-- ✓ Asymmetric QK/V head dims (192 QK, 128 V) via zero-pad + slice trick
-- ✓ Forward pass, gradient accumulation, backward pass
-- ✓ DDP distributed training on 2×L40S
-- ✓ Mixed precision (bf16) with gradient checkpointing
-- ✓ Autoregressive generation with KV cache (both GDN recurrent state and MLA KV cache)
-- ✓ Multi-Token Prediction (MLA-based block)
-- ✓ Muon + AdamW optimizer hybrid
+The following have been verified end-to-end: hybrid 3:1 GDN/MLA layer assignment with MLA at layers 3, 7, 11, 15, 19, 23; GDN forward pass with both the PyTorch recurrent fallback (correctness path, no `fla` required) and the `flash-linear-attention` Triton chunk-parallel kernels (fast path); MLA attention with the FlashAttention-2 kernel (fused, O(T) memory, ~3× faster than eager); asymmetric QK/V head dimensions (192 QK, 128 V) via zero-pad + slice; full forward pass, gradient accumulation, and backward pass; DDP distributed training on 2×L40S; mixed precision bfloat16 with gradient checkpointing; autoregressive generation with KV cache covering both GDN recurrent state and MLA KV cache; Multi-Token Prediction via the MLA-based auxiliary block; and the Muon + AdamW optimizer hybrid.
 
 ## References
 
-- [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464) — Yang, Kautz & Hatamizadeh, ICLR 2025
-- [Parallelizing Linear Transformers with the Delta Rule over Sequence Length](https://arxiv.org/abs/2406.06484) — Yang et al., NeurIPS 2024
-- [flash-linear-attention](https://github.com/fla-org/flash-linear-attention) — Triton kernels for GDN and other linear attention models
-- [Muon Optimizer](https://github.com/KellerJordan/Muon)
-- [tiktoken](https://github.com/openai/tiktoken)
-- [SentencePiece](https://github.com/google/sentencepiece)
+[Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464) — Yang, Kautz & Hatamizadeh, ICLR 2025. [Parallelizing Linear Transformers with the Delta Rule over Sequence Length](https://arxiv.org/abs/2406.06484) — Yang et al., NeurIPS 2024. The [flash-linear-attention](https://github.com/fla-org/flash-linear-attention) library provides the Triton kernels for GDN and other linear attention variants. The [Muon optimizer](https://github.com/KellerJordan/Muon) implements Newton-Schulz orthogonalization for hidden-layer weights. Tokenization uses [tiktoken](https://github.com/openai/tiktoken) (default) or [SentencePiece](https://github.com/google/sentencepiece) for custom BPE/Unigram training.
