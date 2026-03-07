@@ -78,7 +78,11 @@ class PretrainConfig:
 class SFTConfig:
     """Stage 2: Supervised Fine-Tuning on instruction data."""
     data_dir: str = "/mnt/zone/A/datasets/sft"
-    max_seq_len: int = 2048
+    # Context extension: SFT runs at 128K (16× pretrain length).
+    # rope_scale_factor divides token positions by 16, keeping them inside
+    # the pretrain RoPE distribution (position interpolation).
+    max_seq_len: int = 131072
+    rope_scale_factor: float = 16.0
     
     batch_size: int = 2
     gradient_accumulation_steps: int = 16
@@ -112,7 +116,9 @@ class SFTConfig:
 class DPOConfig:
     """Stage 3: Direct Preference Optimization."""
     data_dir: str = "/mnt/zone/A/datasets/dpo"
-    max_seq_len: int = 2048
+    # Mirrors SFTConfig: 128K context with position interpolation.
+    max_seq_len: int = 131072
+    rope_scale_factor: float = 16.0
     
     batch_size: int = 1
     gradient_accumulation_steps: int = 16

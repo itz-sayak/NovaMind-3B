@@ -38,9 +38,12 @@ def get_lr(step, total_steps, config):
 
 
 def train_sft(args):
+    sft_config = SFTConfig()
     model_config = NovaMind3BConfig()
     model_config.mtp_depth = 0  # No MTP during SFT
-    sft_config = SFTConfig()
+    # Apply context extension overrides from SFTConfig.
+    model_config.max_seq_len = sft_config.max_seq_len
+    model_config.rope_scale_factor = sft_config.rope_scale_factor
     
     if args.batch_size:
         sft_config.batch_size = args.batch_size

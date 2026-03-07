@@ -76,8 +76,12 @@ def get_log_probs(model, input_ids, labels, loss_mask, ctx):
 
 
 def train_dpo(args):
+    dpo_config = DPOConfig()
     model_config = NovaMind3BConfig()
     model_config.mtp_depth = 0
+    # Apply context extension overrides from DPOConfig.
+    model_config.max_seq_len = dpo_config.max_seq_len
+    model_config.rope_scale_factor = dpo_config.rope_scale_factor
     dpo_config = DPOConfig()
     
     if args.batch_size:

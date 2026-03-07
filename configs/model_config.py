@@ -77,6 +77,11 @@ class NovaMind3BConfig:
     # --- Normalization ---
     rms_norm_eps: float = 1e-6
     rope_base: float = 500_000.0      # Long-range RoPE (LLaMA-3 style)
+    # Position interpolation scale factor for context extension.
+    # Pretrain: 1.0 (no scaling, max_seq_len=8192).
+    # SFT/DPO at 128K: set to 16.0 (= 131072 / 8192) so positions are
+    # divided by 16 before RoPE, keeping them inside the pretrain distribution.
+    rope_scale_factor: float = 1.0
 
     @property
     def num_moe_layers(self) -> int:

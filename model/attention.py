@@ -26,16 +26,20 @@ except ImportError:  # pragma: no cover
 class RotaryEmbedding(nn.Module):
     """Rotary Position Embedding (RoPE)."""
 
-    def __init__(self, dim: int, max_seq_len: int = 8192, base: float = 10000.0):
+    def __init__(self, dim: int, max_seq_len: int = 8192, base: float = 10000.0,
+                 rope_scale_factor: float = 1.0):
         super().__init__()
         self.dim = dim
         self.max_seq_len = max_seq_len
+        self.rope_scale_factor = rope_scale_factor
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self._build_cache(max_seq_len)
 
     def _build_cache(self, seq_len: int):
-        t = torch.arange(seq_len, dtype=self.inv_freq.dtype)
+        # Divide positions by rope_scale_factor to implement position
+        # interpolation for context extension (Chen et al. 2023).
+        t = torch.arange(seq_len, dtype=self.inv_freq.dtype) / self.rope_scale_factor
         freqs = torch.outer(t, self.inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
         self.register_buffer("cos_cached", emb.cos(), persistent=False)
@@ -115,6 +119,7 @@ class MultiHeadLatentAttention(nn.Module):
             self.d_rope,
             max_seq_len=config.max_seq_len,
             base=getattr(config, "rope_base", 500_000.0),
+            rope_scale_factor=getattr(config, "rope_scale_factor", 1.0),
         )
 
         # Scaling factors (following NovaMind: additional RMSNorm after compressed latents)
