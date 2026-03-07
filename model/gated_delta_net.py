@@ -84,7 +84,7 @@ except (ImportError, RuntimeError):
 _fla_mode: str = "chunk" if _FLA_AVAILABLE else "off"
 
 
-def warmup_fla_kernels(device: torch.device = None):
+def warmup_fla_kernels(device: torch.device = None, verbose: bool = True):
     """Probe FLA Triton kernels with a tiny forward+backward and select the
     best working mode.  Must be called **before** the first training step so
     that a Triton compilation failure doesn't crash real training.
@@ -98,6 +98,20 @@ def warmup_fla_kernels(device: torch.device = None):
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Warn about conflicting FLA packages
+    if verbose:
+        try:
+            import importlib.metadata as _im
+            fla_dists = [d.metadata['Name'] for d in _im.distributions()
+                         if 'fla' in d.metadata['Name'].lower()]
+            if len(fla_dists) > 1:
+                print(f"  WARNING: Multiple FLA packages installed: {fla_dists}")
+                print("  This causes Triton kernel conflicts. Fix with:")
+                print("    pip uninstall fla-core flash-linear-attention -y")
+                print("    pip install git+https://github.com/fla-org/flash-linear-attention.git --force-reinstall --no-deps")
+        except Exception:
+            pass
+
     B, T, H, D_k, D_v = 1, 16, 2, 32, 32
     q = torch.randn(B, T, H, D_k, device=device, dtype=torch.bfloat16, requires_grad=True)
     k = torch.randn_like(q, requires_grad=True)
@@ -108,7 +122,6 @@ def warmup_fla_kernels(device: torch.device = None):
     for mode, kernel in (("chunk", chunk_gated_delta_rule),
                          ("recurrent", fused_recurrent_gated_delta_rule)):
         try:
-            # Fresh tensors for each probe (autograd graph is consumed by backward)
             q_ = q.detach().clone().requires_grad_(True)
             k_ = k.detach().clone().requires_grad_(True)
             v_ = v.detach().clone().requires_grad_(True)
@@ -117,7 +130,9 @@ def warmup_fla_kernels(device: torch.device = None):
             o.sum().backward()
             _fla_mode = mode
             return _fla_mode
-        except Exception:
+        except Exception as e:
+            if verbose:
+                print(f"  FLA probe '{mode}' failed: {type(e).__name__}: {e}")
             continue
 
     _fla_mode = "off"
