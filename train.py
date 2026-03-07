@@ -40,6 +40,17 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# ── Pre-parse FLA_DISABLE before model imports ────────────────────────────
+# gated_delta_net.py checks FLA_DISABLE at import time, so we must set it
+# before importing the model. Parse --smoke-test/--no-fla minimally here.
+_pre = argparse.ArgumentParser(add_help=False)
+_pre.add_argument("--smoke-test", action="store_true")
+_pre.add_argument("--no-fla", action="store_true")
+_pre_args, _ = _pre.parse_known_args()
+if _pre_args.no_fla or _pre_args.smoke_test:
+    os.environ.setdefault("FLA_DISABLE", "1")
+del _pre, _pre_args
+
 from configs.model_config import NovaMind3BConfig
 from configs.train_config import PretrainConfig
 from model.transformer import NovaMind3B
@@ -311,8 +322,6 @@ def train(args):
         train_config.use_mtp = False
     if args.no_compile:
         train_config.compile = False
-    if args.no_fla:
-        os.environ["FLA_DISABLE"] = "1"
     if args.data_dir:
         train_config.data_dir = args.data_dir
     if args.output_dir:
