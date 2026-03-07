@@ -1,4 +1,4 @@
-# NovaMind-3B: Hybrid Linear-Attention Language Model
+# NovaMind-2B: Hybrid Linear-Attention Language Model
 
 A from-scratch implementation of a ~3.7 billion parameter language model using a **hybrid linear-attention architecture** — 3:1 Gated DeltaNet / MLA ratio. 75% of layers use O(n) linear attention (Gated DeltaNet) for massive inference throughput, while every 4th layer uses full Multi-head Latent Attention (MLA) to preserve retrieval quality. Trained on 250+ billion tokens of high-quality code, math, web, and educational text.
 
