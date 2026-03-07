@@ -24,7 +24,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 
 torch.set_float32_matmul_precision("high")  # use TF32 on Ampere+
 
@@ -43,7 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from configs.model_config import NovaMind3BConfig
 from configs.train_config import PretrainConfig
 from model.transformer import NovaMind3B
-from data.dataset import PretrainDataset
+from data.dataset import PretrainDataset, StreamingPretrainDataset
 from optim.muon import create_optimizer
 
 try:
@@ -311,6 +311,36 @@ def train(args):
         train_config.use_mtp = False
     if args.no_compile:
         train_config.compile = False
+    if args.no_fla:
+        os.environ["FLA_DISABLE"] = "1"
+    if args.smoke_test:
+        # Tiny model (~50M params) for local validation — does not fit the 3B config on 24 GB
+        model_config.hidden_dim = 512
+        model_config.num_layers = 4
+        model_config.num_dense_layers = 4
+        model_config.gdn_num_heads = 2
+        model_config.gdn_head_dim = 64
+        model_config.n_heads = 4
+        model_config.d_head = 128
+        model_config.d_kv_comp = 128
+        model_config.d_q_comp = 256
+        model_config.d_rope = 64
+        model_config.dense_intermediate = 1024
+        model_config.hybrid_attention_layers = [3]
+        model_config.mtp_depth = 0
+        train_config.use_mtp = False
+        train_config.compile = False
+        train_config.num_workers = 0   # avoid fork+CUDA issues on constrained hardware
+        if not args.seq_len:
+            model_config.max_seq_len = 256
+        if not args.max_steps:
+            train_config.max_steps = 5
+        if not args.batch_size:
+            train_config.batch_size = 1
+        if not args.grad_accum:
+            train_config.gradient_accumulation_steps = 1
+        if main:
+            print("[smoke-test] Using tiny model config (~50M params)")
 
     # ── W&B init (rank 0 only) ────────────────────────────────────────────────
     wandb_enabled = False
@@ -377,11 +407,21 @@ def train(args):
     if main:
         print(f"\nLoading data from {train_config.data_dir}...")
     try:
-        train_dataset = PretrainDataset(
-            train_config.data_dir, seq_len=model_config.max_seq_len, split="train"
+        train_dataset = StreamingPretrainDataset(
+            train_config.data_dir,
+            seq_len=model_config.max_seq_len,
+            split="train",
+            shuffle_buffer=train_config.shuffle_buffer,
+            world_size=world_size,
+            rank=rank,
         )
-        val_dataset = PretrainDataset(
-            train_config.data_dir, seq_len=model_config.max_seq_len, split="val"
+        val_dataset = StreamingPretrainDataset(
+            train_config.data_dir,
+            seq_len=model_config.max_seq_len,
+            split="val",
+            shuffle_buffer=1,      # val: no shuffle needed
+            world_size=world_size,
+            rank=rank,
         )
     except FileNotFoundError as e:
         if main:
@@ -392,28 +432,23 @@ def train(args):
         destroy_distributed()
         return
 
-    # DDP: each rank sees a non-overlapping shard of the data
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True) \
-        if world_size > 1 else None
-    val_sampler   = DistributedSampler(val_dataset,   num_replicas=world_size, rank=rank, shuffle=False) \
-        if world_size > 1 else None
+    # StreamingPretrainDataset handles sharding/shuffling internally — no sampler needed
+    train_sampler = None
+    val_sampler   = None
 
+    nw = train_config.num_workers
     train_loader = DataLoader(
         train_dataset,
         batch_size=train_config.batch_size,
-        sampler=train_sampler,
-        shuffle=(train_sampler is None),
-        num_workers=4,
-        pin_memory=True,
+        num_workers=nw,
+        pin_memory=(nw > 0),
         drop_last=True,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=train_config.batch_size,
-        sampler=val_sampler,
-        shuffle=False,
-        num_workers=2,
-        pin_memory=True,
+        num_workers=max(0, nw - 2),
+        pin_memory=(nw > 0),
         drop_last=True,
     )
     
@@ -491,37 +526,27 @@ def train(args):
                     print(f"  DATA PHASE {current_phase_idx+1}: switching to {new_dir}")
                     print(f"{'='*60}\n")
                 try:
-                    train_dataset = PretrainDataset(
-                        new_dir, seq_len=model_config.max_seq_len, split="train"
+                    train_dataset = StreamingPretrainDataset(
+                        new_dir, seq_len=model_config.max_seq_len, split="train",
+                        shuffle_buffer=train_config.shuffle_buffer,
+                        world_size=world_size, rank=rank,
                     )
-                    val_dataset = PretrainDataset(
-                        new_dir, seq_len=model_config.max_seq_len, split="val"
+                    val_dataset = StreamingPretrainDataset(
+                        new_dir, seq_len=model_config.max_seq_len, split="val",
+                        shuffle_buffer=1, world_size=world_size, rank=rank,
                     )
-                    train_sampler = DistributedSampler(
-                        train_dataset, num_replicas=world_size, rank=rank, shuffle=True
-                    ) if world_size > 1 else None
-                    val_sampler = DistributedSampler(
-                        val_dataset, num_replicas=world_size, rank=rank, shuffle=False
-                    ) if world_size > 1 else None
                     train_loader = DataLoader(
                         train_dataset, batch_size=train_config.batch_size,
-                        sampler=train_sampler, shuffle=(train_sampler is None),
-                        num_workers=4, pin_memory=True, drop_last=True,
+                        num_workers=nw, pin_memory=(nw > 0), drop_last=True,
                     )
                     val_loader = DataLoader(
                         val_dataset, batch_size=train_config.batch_size,
-                        sampler=val_sampler, shuffle=False,
-                        num_workers=2, pin_memory=True, drop_last=True,
+                        num_workers=max(0, nw - 2), pin_memory=(nw > 0), drop_last=True,
                     )
                     train_iter = iter(train_loader)
                 except FileNotFoundError as e:
                     if main:
                         print(f"  Warning: Phase data not found ({e}), keeping current data")
-
-        # Reshuffle sampler each epoch in DDP
-        if train_sampler is not None and step > start_step:
-            epoch = (step * train_config.batch_size * train_config.gradient_accumulation_steps) // len(train_dataset)
-            train_sampler.set_epoch(epoch)
 
         # ── Schedule updates ───────────────────────────────────────────
         lr = get_lr(step, train_config)
@@ -703,6 +728,10 @@ if __name__ == "__main__":
     parser.add_argument("--seq-len", type=int, default=None)
     parser.add_argument("--no-mtp", action="store_true")
     parser.add_argument("--no-compile", action="store_true")
+    parser.add_argument("--no-fla", action="store_true",
+                        help="Disable FLA Triton kernels, use pure-PyTorch GDN fallback")
+    parser.add_argument("--smoke-test", action="store_true",
+                        help="Shrink model to tiny size for local smoke testing")
     parser.add_argument("--resume", type=str, default=None)
     # W&B
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")

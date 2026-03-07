@@ -112,6 +112,101 @@ class PretrainDataset(Dataset):
         return x, y
 
 
+class StreamingPretrainDataset(IterableDataset):
+    """Memory-efficient streaming pretraining dataset.
+
+    Reads tokens sequentially from a memory-mapped binary file and yields
+    fixed-length (seq_len, seq_len) input/target pairs.  To provide local
+    shuffling without allocating a full-dataset random permutation (which
+    would require ~50 GB for 354B tokens), it maintains a ring buffer of
+    ``shuffle_buffer`` sequences and samples from it uniformly.
+
+    Suitable for multi-worker DataLoaders and DDP: each (rank, worker) pair
+    is assigned a non-overlapping shard of the data so that all tokens are
+    covered without duplication across processes.
+
+    Args:
+        data_dir:        directory containing ``{split}.bin``.
+        seq_len:         number of input tokens per sample.
+        split:           ``"train"`` or ``"val"``.
+        shuffle_buffer:  number of sequences to hold in the shuffle ring
+                         buffer.  Set to 1 to disable shuffling.
+        world_size:      total number of DDP ranks (sharding denominator).
+        rank:            this process's DDP rank (sharding offset).
+    """
+
+    def __init__(
+        self,
+        data_dir: str,
+        seq_len: int = 2048,
+        split: str = "train",
+        shuffle_buffer: int = 2048,
+        world_size: int = 1,
+        rank: int = 0,
+    ):
+        super().__init__()
+        self.seq_len = seq_len
+        self.shuffle_buffer = max(1, shuffle_buffer)
+        self.world_size = world_size
+        self.rank = rank
+
+        bin_file = os.path.join(data_dir, f"{split}.bin")
+        if not os.path.exists(bin_file):
+            raise FileNotFoundError(
+                f"Pre-tokenized data not found at {bin_file}. "
+                f"Run tokenize_pretrain_data() first."
+            )
+        self._bin_file = bin_file
+        # Open mmap just to report size; workers re-open independently to
+        # avoid sharing mmap file descriptors across fork boundaries.
+        _tmp = np.memmap(bin_file, dtype=np.uint32, mode='r')
+        self._num_tokens = len(_tmp)
+        del _tmp
+        self._num_seqs = (self._num_tokens - 1) // self.seq_len
+        print(f"Loaded {split} data: {self._num_tokens:,} tokens from {bin_file}")
+
+    # DataLoader calls __len__ to estimate epoch length for progress bars.
+    def __len__(self) -> int:
+        return self._num_seqs // self.world_size
+
+    def __iter__(self):
+        # Re-open mmap in each worker to avoid fd sharing across forks.
+        data = np.memmap(self._bin_file, dtype=np.uint32, mode='r')
+
+        # Determine worker shard within this rank's slice.
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            num_global_workers = self.world_size * worker_info.num_workers
+            global_worker_id  = self.rank * worker_info.num_workers + worker_info.id
+        else:
+            num_global_workers = self.world_size
+            global_worker_id  = self.rank
+
+        # Partition sequences evenly across workers; drop remainder.
+        seqs_per_worker = self._num_seqs // num_global_workers
+        start_seq = global_worker_id * seqs_per_worker
+        end_seq   = start_seq + seqs_per_worker
+
+        # Shuffle buffer: a list of pre-fetched (x, y) tensors.
+        rng = random.Random(42 + global_worker_id)
+        buf: list = []
+
+        for seq_idx in range(start_seq, end_seq):
+            s = seq_idx * self.seq_len
+            chunk = torch.from_numpy(data[s : s + self.seq_len + 1].astype(np.int64))
+            buf.append((chunk[:-1], chunk[1:]))
+
+            if len(buf) >= self.shuffle_buffer:
+                # Pop a random item from the buffer.
+                pick = rng.randrange(len(buf))
+                buf[-1], buf[pick] = buf[pick], buf[-1]
+                yield buf.pop()
+
+        # Drain remaining items in the buffer.
+        rng.shuffle(buf)
+        yield from buf
+
+
 class SFTDataset(Dataset):
     """
     Supervised Fine-Tuning dataset.

@@ -36,7 +36,12 @@ import torch.nn.functional as F
 # ── Optional: fla (flash-linear-attention) Triton kernels ──────────────────
 # Provide chunk-parallel training (~5-10x faster than the PyTorch fallback).
 # Install:  pip install flash-linear-attention
+# Set FLA_DISABLE=1 to force the pure-PyTorch fallback (e.g. for smoke tests
+# on hardware where Triton JIT compilation is unavailable or slow).
+import os as _os
 try:
+    if _os.environ.get("FLA_DISABLE", "0") == "1":
+        raise ImportError("FLA_DISABLE=1")
     from fla.ops.gated_delta_rule import (
         chunk_gated_delta_rule,
         fused_recurrent_gated_delta_rule,

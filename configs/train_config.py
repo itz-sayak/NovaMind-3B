@@ -62,6 +62,8 @@ class PretrainConfig:
     dtype: str = "bfloat16"
     compile: bool = True
     gradient_checkpointing: bool = True
+    num_workers: int = 4          # DataLoader worker processes (0 = main process only)
+    shuffle_buffer: int = 2048    # StreamingPretrainDataset shuffle ring buffer size
     
     # Multi-GPU — set ddp=True and launch with torchrun --nproc_per_node=2
     ddp: bool = True
