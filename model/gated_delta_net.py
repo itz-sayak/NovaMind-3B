@@ -47,7 +47,9 @@ try:
         fused_recurrent_gated_delta_rule,
     )
     _FLA_AVAILABLE = True
-except ImportError:
+except (ImportError, RuntimeError):
+    # RuntimeError is raised by triton.autotune at import time when no GPU
+    # is visible (e.g. login node, CPU-only env, or missing CUDA driver).
     _FLA_AVAILABLE = False
     chunk_gated_delta_rule = None
     fused_recurrent_gated_delta_rule = None
